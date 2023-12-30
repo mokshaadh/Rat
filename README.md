@@ -1,5 +1,5 @@
 # The Rat Programming Language
-Rat is a statically typed, multi-paradigm language, designed to fit the needs of every user.
+Rat is a statically typed, multi-paradigm, elegant language, designed to fit the needs of every user.
 
 ## Licensing
 
