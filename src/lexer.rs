@@ -2,20 +2,26 @@ use std::fmt;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum TokenType {
+    Let,
+    In,
     Lambda,
     Identifier(String),
     Dot,
     Operator(String),
+    Number(String),
     LParen, RParen,
     EoF,
 }
 impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            TokenType::Let => write!(f, "let"),
+            TokenType::In => write!(f, "in"),
             TokenType::Lambda => write!(f, "λ"),
             TokenType::Identifier(id) => write!(f, "{}", id),
             TokenType::Dot => write!(f, "."),
             TokenType::Operator(op) => write!(f, "{}", op),
+            TokenType::Number(n) => write!(f, "{}", n),
             TokenType::LParen => write!(f, "("),
             TokenType::RParen => write!(f, ")"),
             TokenType::EoF => write!(f, "EoF")
@@ -133,11 +139,33 @@ impl Lexer{
         let start_pos = self.get_pos();
 
         let mut id = String::new();
-        while self.last.is_alphanumeric() || self.last == '_' || self.last == '\'' {
+        while self.last.is_alphanumeric() || self.last == '_' {
             id.push(self.last);
             self.advance();
         }
-        self.create_token(TokenType::Identifier(id), start_pos)
+        match id.as_str() {
+            "let" => self.create_token(TokenType::Let, start_pos),
+            "in" => self.create_token(TokenType::In, start_pos),
+            _ => self.create_token(TokenType::Identifier(id), start_pos)
+        }
+    }
+
+    fn lex_number(&mut self) -> Token {
+        let start_pos = self.get_pos();
+
+        let mut num = String::new();
+        let mut dot = false;
+
+        while self.last.is_ascii_digit() || self.last == '.' {
+            if self.last == '.' {
+                if dot { break; }
+                dot = true;
+            }
+            num.push(self.last);
+            self.advance();
+        }
+
+        self.create_token(TokenType::Number(num), start_pos)
     }
 
     fn lex_token(&mut self) -> Result<Token, Error> {
@@ -178,7 +206,10 @@ impl Lexer{
             }
 
             // identfiers
-            c if c.is_alphabetic() => Ok(self.lex_identifier()),
+            c if c.is_alphabetic() || c == '_' => Ok(self.lex_identifier()),
+
+            // numbers
+            c if c.is_ascii_digit() || c == '.' => Ok(self.lex_number()),
 
             // EoF
             '\0' => { self.advance(); Ok(self.create_token(TokenType::EoF, start_pos)) }
@@ -186,7 +217,7 @@ impl Lexer{
             _ => {
                 let ch = self.last;
                 self.advance();
-                Err(self.create_error(&format!("Unexpected character '{}'", ch), start_pos))
+                Err(self.create_error(&format!("Unexpected character `{}`", ch), start_pos))
             }
         }
     }
