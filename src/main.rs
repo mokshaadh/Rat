@@ -68,7 +68,7 @@ fn repl() -> rustyline::Result<()> {
 (\\./)     \\.  ....~
 >' '<  (__.'\"\"\"
 \" ` \" \"
-===== Rat v0.1.0 ==
+===== Rat v0.0.1 ==
 ");
 
     let mut space = Namespace::new();
