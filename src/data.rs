@@ -216,8 +216,15 @@ impl Namespace {
                 self.ast_application_desugar(pos, temp, 0, arguments)
             },
 
-            Ast::Let(pos, name, var_val, body) =>
-                Ok(Value::Let(pos, name, self.from_ast(var_val)?.into(), self.from_ast(body)?.into(), Context::new())),
+            Ast::Let(pos, name, parameters, var_val, body) => {
+                if parameters.len() > 0 {
+                    let lambda_var_val = self.ast_lambda_desugar(pos, 0, parameters, var_val)?;
+                    Ok(Value::Let(pos, name, lambda_var_val.into(), self.from_ast(body)?.into(), Context::new()))
+                }
+                else {
+                    Ok(Value::Let(pos, name, self.from_ast(var_val)?.into(), self.from_ast(body)?.into(), Context::new()))
+                }
+            }
 
             Ast::VariableBinding(pos, name, body) => {
                 if self.declarations.contains_key(&name) {
