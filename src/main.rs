@@ -5,104 +5,90 @@ mod parser;
 mod logging;
 mod data;
 
-use std::collections::HashMap;
+mod interactive;
 
-use parser::Parser;
-use lexer::{Lexer, Error};
+use std::env;
+use std::fs;
 
+use interactive::repl;
+
+use lexer::Error;
 use rustyline;
 
-use crate::{logging::{println_error, println_errors}, data::{Substitutable, Environment, Namespace}};
+use crate::data::Environment;
+use crate::data::Namespace;
+use crate::lexer::Lexer;
+use crate::logging::println_error;
+use crate::logging::println_error_msg;
+use crate::logging::println_errors;
+use crate::parser::Parser;
+
 extern crate term;
 
-fn read_eval(space: &mut Namespace, line: &str) -> Result<(), Error> {
-    let mut lxr = Lexer::new(line);
-    lxr.initialize();
-    let tokens = lxr.lex_tokens()?;
-    if tokens.len() == 1 { return Ok(()); }
-
-    let mut psr = Parser::new(tokens.clone());
-    let ast = psr.parse_line_repl()?;
-
-    let mut val = match space.from_ast(ast) {
-        Ok(v) => v,
-        Err(e) => {
-            let err = Error::from_token(&e.0, &tokens[e.1.0]);
-            let err_pos1 = tokens[e.1.0].pos;
-            let err_pos2 = tokens[e.1.1].pos;
-            // println_error("<interactive>".to_string(), Error::from_token(&e.0, &tokens[e.1.0]), &mut term::stdout().unwrap());
-            println_errors("<interactive>".to_string(), err, (err_pos1, err_pos2), &mut term::stdout().unwrap());
-            return Ok(());
-        }
-    };
-
-    let mut env = Environment::new();
-    let ty = env.generate_type_var();
-
-    match space.alg_m(&mut val, &mut env, &ty) {
-        Ok(sub) => {
-            // println!("{}", ty.apply(&sub));
-            println!("{}", ty.apply(&sub).simplify(&mut HashMap::new()));
-        }
-        Err(e) => {
-            let err = Error::from_token(&e.0, &tokens[e.1.0]);
-            let err_pos1 = tokens[e.1.0].pos;
-            let err_pos2 = tokens[e.1.1].pos;
-            // println_error("<interactive>".to_string(), Error::from_token(&e.0, &tokens[e.1.0]), &mut term::stdout().unwrap());
-            println_errors("<interactive>".to_string(), err, (err_pos1, err_pos2), &mut term::stdout().unwrap());
-        }
-    }
-
-    println!("\n{}", val);
-
-
-    Ok(())
-}
-
-fn repl() -> rustyline::Result<()> {
-    let mut rl = rustyline::DefaultEditor::new()?;
-    let mut stdout = term::stdout().unwrap();
-
-    println!(
-"    .----.
-(\\./)     \\.  ....~
->' '<  (__.'\"\"\"
-\" ` \" \"
-===== Rat v0.0.1 ==
-");
-
-    let mut space = Namespace::new();
-
-    loop {
-        let readline = rl.readline(">> ");
-        match readline {
-            Ok(line) => {
-                rl.add_history_entry(line.as_str()).unwrap();
-
-                let read_eval_res = read_eval(&mut space, &line);
-
-                match read_eval_res {
-                    Ok(_) => {}
-                    Err(e) => { println_error("<interactive>".to_string(), e, &mut stdout); }
-                };
-            },
-            Err(rustyline::error::ReadlineError::Interrupted) => {},
-            Err(rustyline::error::ReadlineError::Eof) => {
-                println!("🪤 Exiting Rat. Bye! 🐀");
-                break
-            },
-            Err(err) => {
-                println!("rustyline error: {:?}", err);
-                break
-            }
-        }
-
-    }
-
-    Ok(())
-}
 
 fn main()  -> rustyline::Result<()> {
-    repl()?;
+    let args: Vec<String> = env::args().collect();
+
+    match args.len() {
+        1 => repl()?,
+
+        2 => {
+            let path = &args[1];
+
+            let contents =
+                match fs::read_to_string(path) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        println_error_msg(&format!("Could not read file `{}`: {}", path, e));
+                        return Ok(())
+                    },
+            };
+
+            let mut space = Namespace::new();
+
+            let mut lxr = Lexer::new(&contents);
+            lxr.initialize();
+            let tokens = lxr.lex_tokens()
+                .unwrap_or_else(|err| { println_error(path, err); std::process::exit(1) });
+
+            if tokens.len() == 1 { return Ok(()); }
+
+            let mut psr = Parser::new(tokens.clone());
+            let asts = psr.parse_file()
+                .unwrap_or_else(|err| { println_error(path, err); std::process::exit(1) });
+
+            for ast in asts {
+                let mut val = match space.from_ast(ast) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err = Error::from_token(&e.0, &tokens[e.1.0]);
+                        let err_pos1 = tokens[e.1.0].pos;
+                        let err_pos2 = tokens[e.1.1].pos;
+                        println_errors(path, err, (err_pos1, err_pos2));
+                        return Ok(());
+                    }
+                };
+
+                let mut env = Environment::new();
+
+                space.alg_w(&mut val, &mut env)
+                    .unwrap_or_else(|e| {
+                        let err = Error::from_token(&e.0, &tokens[e.1.0]);
+                        let err_pos1 = tokens[e.1.0].pos;
+                        let err_pos2 = tokens[e.1.1].pos;
+                        println_errors(path, err, (err_pos1, err_pos2));
+                        std::process::exit(1);
+                    });
+            }
+
+            match space.get_decl("main") {
+                Some(s) => println!("{}", s),
+                None => println_error_msg("Could not find entry function `main`"),
+            }
+        },
+
+        _ => println_error_msg("Invalid amount of arguments passed into Rat"),
+    };
+
     Ok(())
 }

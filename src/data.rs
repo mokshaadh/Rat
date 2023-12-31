@@ -7,6 +7,7 @@ use crate::parser::Ast;
 
 #[derive(Clone)]
 pub enum Value {
+    Empty,
     Identifier(usize, String),
     Number(usize, String),
     Lambda((usize, usize), String, Box<Value>, Context),
@@ -21,6 +22,7 @@ impl fmt::Display for Value {
             Value::Lambda(_, parameter, body, ctx) => write!(f, "λ{}. {} | {}", parameter, body, ctx),
             Value::Application(_, func, arg) => write!(f, "({}) {}", func, arg),
             Value::Let(_, name, var_val, body, ctx) => write!(f, "let {} = {} in {} | {}", name, var_val, body, ctx),
+            Value::Empty => write!(f, ""),
         }
     }
 }
@@ -36,10 +38,6 @@ pub struct Context {
 impl Context {
     pub fn new() -> Self {
         Self { bindings: HashMap::new() }
-    }
-
-    pub fn from(other: &Context) -> Self {
-        Self { bindings: other.bindings.clone() }
     }
 
     pub fn add(&mut self, name: &str, ty: &PolyType) {
@@ -104,17 +102,6 @@ impl Environment {
         self.ctxs.pop_back();
     }
 
-    pub fn add(&mut self, name: &str, ty: &PolyType) {
-        match self.ctxs.back_mut() {
-            Some(ctx) => ctx.add(name, ty),
-            None => {
-                let mut new_ctx = Context::new();
-                new_ctx.add(name, ty);
-                self.push_ctx(&new_ctx);
-            }
-        }
-    }
-
     pub fn get(&self, name: &str) -> Option<&PolyType> {
         for ctx in self.ctxs.iter().rev() {
             if let Some(pt) = ctx.get(name) {
@@ -170,7 +157,8 @@ impl DeclarationInformation {
 
 impl fmt::Display for DeclarationInformation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "value: {}, type: {}", self.val, self.ty)
+        // write!(f, "value: {}\ntype: {}", self.val, self.ty.simplify(&mut HashMap::new()))
+        write!(f, "value: {}\ntype: {}", self.val, self.ty)
     }
 }
 
@@ -189,6 +177,10 @@ impl Namespace {
 
     pub fn add_decl(&mut self, name: &str, decl_info: DeclarationInformation) {
         self.declarations.insert(name.to_string(), decl_info);
+    }
+
+    pub fn get_decl(&self, name: &str) -> Option<&DeclarationInformation> {
+        self.declarations.get(name)
     }
 
     fn ast_lambda_desugar(&mut self, pos: (usize, usize), index: usize, parameters: Vec<String>, body: Rc<Ast>) -> Result<Value, (String, (usize, usize))> {
@@ -227,151 +219,207 @@ impl Namespace {
             Ast::Let(pos, name, var_val, body) =>
                 Ok(Value::Let(pos, name, self.from_ast(var_val)?.into(), self.from_ast(body)?.into(), Context::new())),
 
-            Ast::VariableBinding(_, name, body) => {
-                let mut body_val = self.from_ast(body)?;
-                let mut env = Environment::new();
-                let end_ty = env.generate_type_var();
-                let sub = self.alg_m(&mut body_val, &mut env, &end_ty)?;
+            Ast::VariableBinding(pos, name, body) => {
+                if self.declarations.contains_key(&name) {
+                    Err((format!("Attempting to rebind `{}`", name), pos))
+                }
+                else {
+                    let mut body_val = self.from_ast(body)?;
+                    let mut env = Environment::new();
+                    let (sub, end_ty) = self.alg_w(&mut body_val, &mut env)?;
 
-                self.add_decl(
-                    &name,
-                    DeclarationInformation::new(
-                        &body_val.clone(),
-                        &end_ty.apply(&sub),
-                        &sub,
-                        &env
-                    ));
+                    self.add_decl(
+                        &name,
+                        DeclarationInformation::new(
+                            &body_val.clone(),
+                            &end_ty.apply(&sub),
+                            &sub,
+                            &env
+                        ));
 
-                Ok(body_val)
+                    Ok(body_val)
+                }
             }
 
             Ast::FunctionBinding(pos, name, parameters, body) => {
-                let mut lambda_val = self.ast_lambda_desugar(pos, 0, parameters, body)?;
-                let mut env = Environment::new();
-                let end_ty = env.generate_type_var();
-                let sub = self.alg_m(&mut lambda_val, &mut env, &end_ty)?;
+                if self.declarations.contains_key(&name) {
+                    Err((format!("Attempting to rebind `{}`", name), pos))
+                }
+                else {
+                    let mut lambda_val = self.ast_lambda_desugar(pos, 0, parameters, body)?;
+                    let mut env = Environment::new();
+                    let (sub, end_ty) = self.alg_w(&mut lambda_val, &mut env)?;
 
-                self.add_decl(
-                    &name,
-                    DeclarationInformation::new(
-                        &lambda_val.clone(),
-                        &end_ty.apply(&sub),
-                        &sub,
-                        &env
-                    )
-                );
+                    self.add_decl(
+                        &name,
+                        DeclarationInformation::new(
+                            &lambda_val.clone(),
+                            &end_ty.apply(&sub),
+                            &sub,
+                            &env
+                        )
+                    );
 
-                Ok(lambda_val)
+                    Ok(lambda_val)
+                }
             }
         }
     }
 
-    pub fn alg_m(&mut self, val: &mut Value, env: &mut Environment, ty: &MonoType) -> Result<Substitution, (String, (usize, usize))> {
+    pub fn alg_w(&mut self, val: &mut Value, env: &mut Environment) -> Result<(Substitution, MonoType), (String, (usize, usize))>{
         match val {
             Value::Identifier(pos, name) => {
-                // try to get name of variable from environment
                 match env.clone().get(name) {
-                    Some(pt) => {
-                        // now, we try to unify that name's associated polytype (instantiated -> monotype) with the passed-in monotype
-                        match unify(ty, &pt.instantiate(&mut HashMap::new(), env)) {
-                            Ok(res) => Ok(res),
-                            Err(e) => Err((e, (*pos, *pos)))
-                        }
-                    }
+                    Some(pt) => Ok((Substitution::new(), pt.instantiate(&mut HashMap::new(), env))),
                     None => {
-                        // look in the namespace list of declarations
-                        match self.declarations.get(name) {
-                            Some(decl) => {
-                                match unify(ty, &generalize(env, decl.ty.clone()).instantiate(&mut HashMap::new(), env)) {
-                                    Ok(res) => Ok(res),
-                                    Err(e) => Err((e, (*pos, *pos)))
-                                }
-                            }
-                            // name not found
-                            None => Err((format!("Value `{}` was not found in the current namespace or environment", name), (*pos, *pos)))
+                        match self.get_decl(name) {
+                            Some(decl) =>
+                                Ok((Substitution::new(), generalize(env, decl.ty.clone()).instantiate(&mut HashMap::new(), env))),
+                            None =>
+                                Err((format!("Value `{}` was not found in the current environment or namespace", name), (*pos, *pos)))
                         }
                     }
                 }
             }
 
-            Value::Number(pos, _) => {
-                match unify(ty, &MonoType::Num) {
-                    Ok(res) => Ok(res),
-                    Err(e) => Err((e, (*pos, *pos)))
-                }
+            Value::Application(pos, function, argument) => {
+                let (sub1, tao1) = self.alg_w(function, env)?;
+
+                *env = env.apply(&sub1);
+
+                let (sub2, tao2) = self.alg_w(argument, env)?;
+
+                let beta = env.generate_type_var();
+                let sub3 =
+                    match unify(&tao1.apply(&sub2), &MonoType::Arrow(tao2.into(), beta.clone().into())) {
+                        Ok(sub) => sub,
+                        Err(e) => return Err((e, *pos))
+                    };
+
+                Ok((sub3.combine(&sub2.combine(&sub1)), beta.apply(&sub3)))
             }
 
-            Value::Lambda(pos, parameter, body, ctx) => {
-                let beta1 = env.generate_type_var();
-                let beta2 = env.generate_type_var();
+            Value::Lambda(_, parameter, body, ctx) => {
+                let beta =  env.generate_type_var();
 
-                // we try to unify the inputed monotype with the newly generated function application type "a -> b"
-                // in order to create subsitution one
-                let sub1 = match unify(ty, &MonoType::Arrow(beta1.clone().into(), beta2.clone().into())) {
-                    Ok(res) => res,
-                    Err(e) => return Err((e, *pos))
-                };
-
-                // next, we populate the lambda's context (because we haven't done so already
-                // - (for now) I find it easier to populate right here in one step rather than seperating it out into multiple)
-                ctx.add(parameter, &PolyType::Mono(beta1.apply(&sub1)));
-
-                // add the lambda context to the environment
+                ctx.add(parameter, &PolyType::Mono(beta.clone()));
                 env.push_ctx(ctx);
 
-                // get the substitution for the type of the lambda body (beta2)
-                let sub2 = self.alg_m(body, env, &beta2.apply(&sub1))?;
-
-                // pop the lambda's context from the environment
-                env.pop_ctx();
-
-                // finally, return sub2 (lambda body) combined with sub1 (lambda parameter)
-                Ok(sub2.combine(&sub1))
-            }
-            Value::Application(_, function, argument) => {
-                let beta = env.generate_type_var();
-
-                // beta -> input type
-                let sub1 = self.alg_m(function, env, &MonoType::Arrow(beta.clone().into(), ty.clone().into()))?;
-
-                // create a new environment and apply sub1 to it. the reason we don't just directly pass this into sub2 as the env is
-                // because of an annoying problem with the typevar generation. Because constraining and environment with a substitution creates a
-                // fresh new environment (albiet, with the same generator number as the original environment), when we pass that environment into the alg_m function,
-                // we need to then grab the generation number at the end and use it as the original environment's generation number
-                let mut new_env = Environment::from(env).apply(&sub1);
-
-                let sub2 = self.alg_m(argument, &mut new_env, &beta.apply(&sub1))?;
-
-                // see above comment
-                env.num = new_env.num;
-
-                Ok(sub2.combine(&sub1))
-            }
-            Value::Let(_, name, var_val, body, ctx) => {
-                let beta = env.generate_type_var();
-
-                let sub1 = self.alg_m(var_val, env, &beta)?;
-
-                // this new environment is simply for generalization
-                // it doesn't need to mutable because generalize doesn't need a mutable environment (it simply gets the free variables in an environment)
-                // so we don't need to do env.num = new_env_1.num :)
-                let new_env_1 = Environment::from(env).apply(&sub1);
-
-                ctx.add(name, &generalize(&new_env_1, beta.apply(&sub1)));
-                env.push_ctx(ctx);
-
-                let mut new_env_2 = Environment::from(env).apply(&sub1);
-
-                let sub2 = self.alg_m(body, &mut new_env_2, &ty.apply(&sub1))?;
+                let (sub1, tao1) = self.alg_w(body, env)?;
 
                 env.pop_ctx();
 
-                env.num = new_env_2.num;
-
-                Ok(sub2.combine(&sub1))
+                let retrty = MonoType::Arrow(beta.into(), tao1.into()).apply(&sub1);
+                Ok((sub1, retrty))
             }
+
+            Value::Let(_, var_name, var_val, body, ctx) => {
+                let (sub1, tao1) = self.alg_w(var_val, env)?;
+
+                *env = env.apply(&sub1);
+
+                ctx.add(var_name, &generalize(env, tao1));
+                env.push_ctx(ctx);
+
+                let (sub2, tao2) = self.alg_w(body, env)?;
+
+                env.pop_ctx();
+
+                Ok((sub2.combine(&sub1), tao2))
+            }
+
+            Value::Number(_, _) => Ok((Substitution::new(), MonoType::Num)),
+
+            Value::Empty => unimplemented!()
         }
     }
+
+    // pub fn alg_m(&mut self, val: &mut Value, env: &mut Environment, ty: &MonoType) -> Result<Substitution, (String, (usize, usize))> {
+    //     match val {
+    //         Value::Identifier(pos, name) => {
+    //             match env.clone().get(name) {
+    //                 Some(pt) =>
+    //                     match unify(ty, &pt.instantiate(&mut HashMap::new(), env)) {
+    //                         Ok(sub) => Ok(sub),
+    //                         Err(e) => Err((e, (*pos, *pos)))
+    //                     },
+
+    //                 None => match self.get_decl(name) {
+    //                     Some(decl) =>
+    //                         match unify(ty, &generalize(env, decl.ty.clone()).instantiate(&mut HashMap::new(), env)) {
+    //                             Ok(sub) => Ok(sub),
+    //                             Err(e) => Err((e, (*pos, *pos)))
+    //                         }
+    //                     None =>
+    //                         Err((format!("Value `{}` was not found in the current environment or namespace", name), (*pos, *pos)))
+    //                 }
+    //             }
+    //         }
+
+    //         Value::Application(_, function, argument) => {
+    //             let beta = env.generate_type_var();
+
+    //             let sub1 = self.alg_m(function, env, &MonoType::Arrow(beta.clone().into(), ty.clone().into()))?;
+
+    //             *env = env.apply(&sub1);
+
+    //             let sub2 = self.alg_m(argument, env, &beta.apply(&sub1))?;
+
+
+    //             Ok(sub2.combine(&sub1))
+    //         }
+
+
+    //         Value::Lambda(pos, parameter, body, ctx) => {
+    //             let beta1 = env.generate_type_var();
+    //             let beta2 = env.generate_type_var();
+
+    //             let sub1 =
+    //                 match unify(ty, &MonoType::Arrow(beta1.clone().into(), beta2.clone().into())) {
+    //                     Ok(sub) => sub,
+    //                     Err(e) => return Err((e, *pos))
+    //                 };
+
+    //             *env = env.apply(&sub1);
+
+    //             ctx.add(parameter, &PolyType::Mono(beta1.apply(&sub1)));
+    //             env.push_ctx(ctx);
+
+    //             let sub2 = self.alg_m(body, env, &beta2.apply(&sub1))?;
+
+    //             env.pop_ctx();
+
+    //             Ok(sub2.combine(&sub1))
+    //         }
+
+    //         Value::Let(_, var_name, var_val, body, ctx) => {
+    //             let beta = env.generate_type_var();
+
+    //             let sub1 = self.alg_m(var_val, env, &beta)?;
+
+    //             *env = env.apply(&sub1);
+
+    //             ctx.add(&var_name, &generalize(env, beta.apply(&sub1)));
+    //             env.push_ctx(ctx);
+
+    //             let sub2 = self.alg_m(body, env, &ty.apply(&sub1))?;
+
+    //             env.pop_ctx();
+
+    //             Ok(sub2.combine(&sub1))
+    //         }
+
+    //         Value::Number(pos, _) => {
+    //             match unify(ty, &MonoType::Num) {
+    //                 Ok(res) => Ok(res),
+    //                 Err(e) => Err((e, (*pos, *pos)))
+    //             }
+    //         }
+
+    //         Value::Empty => unimplemented!()
+    //     }
+    // }
+
 }
 
 

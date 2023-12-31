@@ -46,13 +46,11 @@ impl fmt::Display for Ast {
 pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
-
-    restore_point: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0, restore_point: 0 }
+        Self { tokens, index: 0}
     }
 
     fn advance(&mut self) {
@@ -64,13 +62,6 @@ impl Parser {
     }
     fn curr_tok(&self) -> &Token {
         &self.tokens[self.index]
-    }
-
-    fn create_restore(&mut self) {
-        self.restore_point = self.index;
-    }
-    fn goto_restore(&mut self) {
-        self.index = self.restore_point;
     }
 
     fn parse_atom(&mut self) -> Result<Rc<Ast>, Error> {
@@ -168,20 +159,31 @@ impl Parser {
 
         let f = self.parse_atom()?;
 
+        let restore = self.index;
+
         if let Ok(arg) = self.parse_atom() {
             let mut args = vec![arg];
-            while let Ok(arg) = self.parse_atom() {
-                args.push(arg);
+            loop {
+                let restore = self.index;
+                if let Ok(arg) = self.parse_atom() {
+                    args.push(arg);
+                }
+                else {
+                    self.index = restore;
+                    break;
+                }
             }
             Ok(Ast::FunctionApplication((start_idx, self.index - 1), f, args).into())
         }
         else {
+            self.index = restore;
             Ok(f)
         }
     }
 
     fn parse_expression(&mut self) -> Result<Rc<Ast>, Error> {
-        self.parse_application()
+        let retr = self.parse_application();
+        retr
     }
 
     fn parse_binding(&mut self) -> Result<Rc<Ast>, Error> {
@@ -227,16 +229,32 @@ impl Parser {
     }
 
     pub fn parse_line_repl(&mut self) -> Result<Rc<Ast>, Error> {
-        self.create_restore();
+        let restore = self.index;
 
-        if let TokenType::Let = self.curr_tok().clone().tok_type {
+        if let TokenType::Let = self.curr_tok().tok_type {
             match self.parse_expression() {
                 Ok(b) => Ok(b),
-                Err(_) => { self.goto_restore(); self.parse_binding() }
+                Err(_) => { self.index = restore; self.parse_binding() }
             }
         }
         else {
             self.parse_expression()
         }
+    }
+
+    fn parse_declaration(&mut self) -> Result<Rc<Ast>, Error> {
+        match self.curr_tok().tok_type {
+            TokenType::Let => self.parse_binding(),
+            _ => Err(Error::from_token("Expected declaration at top level of file", self.curr_tok()))
+        }
+    }
+
+    pub fn parse_file(&mut self) -> Result<Vec<Rc<Ast>>, Error> {
+        let mut retr = Vec::new();
+        while !self.curr_tok().is(TokenType::EoF) {
+            let decl = self.parse_declaration()?;
+            retr.push(decl);
+        }
+        Ok(retr)
     }
 }
